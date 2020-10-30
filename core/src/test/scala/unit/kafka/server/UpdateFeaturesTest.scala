@@ -121,8 +121,7 @@ class UpdateFeaturesTest extends BaseRequestTest {
                             expectedFinalizedFeaturesEpoch: Long,
                             expectedSupportedFeatures: Features[SupportedVersionRange]): Unit = {
     assertEquals(expectedNode, getFeatureZNode())
-    val featureMetadata = client.describeFeatures(
-      new DescribeFeaturesOptions().sendRequestToController(true)).featureMetadata.get
+    val featureMetadata = client.describeFeatures(new DescribeFeaturesOptions()).featureMetadata.get
     assertEquals(expectedFinalizedFeatures, finalizedFeatures(featureMetadata.finalizedFeatures))
     assertEquals(expectedSupportedFeatures, supportedFeatures(featureMetadata.supportedFeatures))
     assertEquals(Optional.of(expectedFinalizedFeaturesEpoch), featureMetadata.finalizedFeaturesEpoch)

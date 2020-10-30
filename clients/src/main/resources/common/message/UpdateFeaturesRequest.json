@@ -1,4 +1,4 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
+ // Licensed to the Apache Software Foundation (ASF) under one or more
 // contributor license agreements.  See the NOTICE file distributed with
 // this work for additional information regarding copyright ownership.
 // The ASF licenses this file to You under the Apache License, Version 2.0
@@ -22,6 +22,8 @@
   "fields": [
     { "name": "timeoutMs", "type": "int32", "versions": "0+", "default": "60000",
       "about": "How long to wait in milliseconds before timing out the request." },
+    { "name": "ExpectedFinalizedFeaturesEpoch", "type": "int64", "versions": "3+",
+      "default": "-1", "about": "The expected epoch for the finalized features information. If this field is set to a valid value, the server will apply the provided feature updates only if the existing epoch matches the provided value. Valid values are >= 0. The default value is -1 and it means this validation is turned off."},
     { "name": "FeatureUpdates", "type": "[]FeatureUpdateKey", "versions": "0+",
       "about": "The list of updates to finalized features.", "fields": [
       {"name": "Feature", "type": "string", "versions": "0+", "mapKey": true,

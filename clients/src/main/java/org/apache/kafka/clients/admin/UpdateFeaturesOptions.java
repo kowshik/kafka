@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.admin;
 
 import java.util.Map;
+import java.util.Optional;
 import org.apache.kafka.common.annotation.InterfaceStability;
 
 /**
@@ -26,4 +27,15 @@ import org.apache.kafka.common.annotation.InterfaceStability;
  */
 @InterfaceStability.Evolving
 public class UpdateFeaturesOptions extends AbstractOptions<UpdateFeaturesOptions> {
+
+    private Optional<Long> expectedFinalizedFeaturesEpoch;
+
+    public Optional<Long> expectedFinalizedFeaturesEpoch() {
+        return expectedFinalizedFeaturesEpoch;
+    }
+
+    public UpdateFeaturesOptions expectedFinalizedFeaturesEpoch(long expectedFinalizedFeaturesEpoch) {
+        this.expectedFinalizedFeaturesEpoch = Optional.of(expectedFinalizedFeaturesEpoch);
+        return this;
+    }
 }

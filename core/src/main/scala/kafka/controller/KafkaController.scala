@@ -2011,62 +2011,68 @@ class KafkaController(val config: KafkaConfig,
   private def processFeatureUpdatesWithActiveController(request: UpdateFeaturesRequest,
                                                         callback: UpdateFeaturesCallback): Unit = {
     val updates = request.data.featureUpdates
-    val existingFeatures = featureCache.get
-      .map(featuresAndEpoch => featuresAndEpoch.features.features().asScala)
-      .getOrElse(Map[String, FinalizedVersionRange]())
-    // A map with key being feature name and value being FinalizedVersionRange.
-    // This contains the target features to be eventually written to FeatureZNode.
-    val targetFeatures = scala.collection.mutable.Map[String, FinalizedVersionRange]() ++ existingFeatures
-    // A map with key being feature name and value being error encountered when the FeatureUpdate
-    // was applied.
-    val errors = scala.collection.mutable.Map[String, ApiError]()
+    val featuresAndEpochOpt = featureCache.get
+    val expectedEpoch = request.data.expectedFinalizedFeaturesEpoch
+    if (expectedEpoch >= 0 && featuresAndEpochOpt.isDefined && expectedEpoch != featuresAndEpochOpt.get.epoch) {
+      callback(Left(new ApiError(Errors.INVALID_REQUEST)))
+    } else {
+      val existingFeatures = featureCache.get
+        .map(featuresAndEpoch => featuresAndEpoch.features.features().asScala)
+        .getOrElse(Map[String, FinalizedVersionRange]())
+      // A map with key being feature name and value being FinalizedVersionRange.
+      // This contains the target features to be eventually written to FeatureZNode.
+      val targetFeatures = scala.collection.mutable.Map[String, FinalizedVersionRange]() ++ existingFeatures
+      // A map with key being feature name and value being error encountered when the FeatureUpdate
+      // was applied.
+      val errors = scala.collection.mutable.Map[String, ApiError]()
 
-    // Below we process each FeatureUpdate using the following logic:
-    //  - If a FeatureUpdate is found to be valid, then:
-    //    - The corresponding entry in errors map would be updated to contain Errors.NONE.
-    //    - If the FeatureUpdate is an add or update request, then the targetFeatures map is updated
-    //      to contain the new FinalizedVersionRange for the feature.
-    //    - Otherwise if the FeatureUpdate is a delete request, then the feature is removed from the
-    //      targetFeatures map.
-    //  - Otherwise if a FeatureUpdate is found to be invalid, then:
-    //    - The corresponding entry in errors map would be updated with the appropriate ApiError.
-    //    - The entry in targetFeatures map is left untouched.
-    updates.asScala.iterator.foreach { update =>
-      validateFeatureUpdate(update, existingFeatures.get(update.feature())) match {
-        case Left(newVersionRangeOrNone) =>
-          newVersionRangeOrNone match {
-            case Some(newVersionRange) => targetFeatures += (update.feature() -> newVersionRange)
-            case None => targetFeatures -= update.feature()
-          }
-          errors += (update.feature() -> new ApiError(Errors.NONE))
-        case Right(featureUpdateFailureReason) =>
-          errors += (update.feature() -> featureUpdateFailureReason)
-      }
-    }
-
-    // If the existing and target features are the same, then, we skip the update to the
-    // FeatureZNode as no changes to the node are required. Otherwise, we replace the contents
-    // of the FeatureZNode with the new features. This may result in partial or full modification
-    // of the existing finalized features in ZK.
-    try {
-      if (!existingFeatures.equals(targetFeatures)) {
-        val newNode = new FeatureZNode(FeatureZNodeStatus.Enabled, Features.finalizedFeatures(targetFeatures.asJava))
-        val newVersion = updateFeatureZNode(newNode)
-        featureCache.waitUntilEpochOrThrow(newVersion, request.data().timeoutMs())
-      }
-    } catch {
-      // For all features that correspond to valid FeatureUpdate (i.e. error is Errors.NONE),
-      // we set the error as Errors.FEATURE_UPDATE_FAILED since the FeatureZNode update has failed
-      // for these. For the rest, the existing error is left untouched.
-      case e: Exception =>
-        warn(s"Processing of feature updates: $request failed due to error: $e")
-        errors.foreach { case (feature, apiError) =>
-          if (apiError.error() == Errors.NONE) {
-            errors(feature) = new ApiError(Errors.FEATURE_UPDATE_FAILED)
-          }
+      // Below we process each FeatureUpdate using the following logic:
+      //  - If a FeatureUpdate is found to be valid, then:
+      //    - The corresponding entry in errors map would be updated to contain Errors.NONE.
+      //    - If the FeatureUpdate is an add or update request, then the targetFeatures map is updated
+      //      to contain the new FinalizedVersionRange for the feature.
+      //    - Otherwise if the FeatureUpdate is a delete request, then the feature is removed from the
+      //      targetFeatures map.
+      //  - Otherwise if a FeatureUpdate is found to be invalid, then:
+      //    - The corresponding entry in errors map would be updated with the appropriate ApiError.
+      //    - The entry in targetFeatures map is left untouched.
+      updates.asScala.iterator.foreach { update =>
+        validateFeatureUpdate(update, existingFeatures.get(update.feature())) match {
+          case Left(newVersionRangeOrNone) =>
+            newVersionRangeOrNone match {
+              case Some(newVersionRange) => targetFeatures += (update.feature() -> newVersionRange)
+              case None => targetFeatures -= update.feature()
+            }
+            errors += (update.feature() -> new ApiError(Errors.NONE))
+          case Right(featureUpdateFailureReason) =>
+            errors += (update.feature() -> featureUpdateFailureReason)
         }
-    } finally {
-      callback(Right(errors))
+      }
+
+      // If the existing and target features are the same, then, we skip the update to the
+      // FeatureZNode as no changes to the node are required. Otherwise, we replace the contents
+      // of the FeatureZNode with the new features. This may result in partial or full modification
+      // of the existing finalized features in ZK.
+      try {
+        if (!existingFeatures.equals(targetFeatures)) {
+          val newNode = new FeatureZNode(FeatureZNodeStatus.Enabled, Features.finalizedFeatures(targetFeatures.asJava))
+          val newVersion = updateFeatureZNode(newNode)
+          featureCache.waitUntilEpochOrThrow(newVersion, request.data().timeoutMs())
+        }
+      } catch {
+        // For all features that correspond to valid FeatureUpdate (i.e. error is Errors.NONE),
+        // we set the error as Errors.FEATURE_UPDATE_FAILED since the FeatureZNode update has failed
+        // for these. For the rest, the existing error is left untouched.
+        case e: Exception =>
+          warn(s"Processing of feature updates: $request failed due to error: $e")
+          errors.foreach { case (feature, apiError) =>
+            if (apiError.error() == Errors.NONE) {
+              errors(feature) = new ApiError(Errors.FEATURE_UPDATE_FAILED)
+            }
+          }
+      } finally {
+        callback(Right(errors))
+      }
     }
   }
 

@@ -4353,11 +4353,7 @@ public class KafkaAdminClient extends AdminClient {
     public DescribeFeaturesResult describeFeatures(final DescribeFeaturesOptions options) {
         final KafkaFutureImpl<FeatureMetadata> future = new KafkaFutureImpl<>();
         final long now = time.milliseconds();
-        final NodeProvider provider =
-            options.sendRequestToController() ? new ControllerNodeProvider() : new LeastLoadedNodeProvider();
-
-        final Call call = new Call(
-            "describeFeatures", calcDeadlineMs(now, options.timeoutMs()), provider) {
+        final Call call = new Call("describeFeatures", calcDeadlineMs(now, options.timeoutMs()), new LeastLoadedNodeProvider()) {
 
             private FeatureMetadata createFeatureMetadata(final ApiVersionsResponse response) {
                 final Map<String, FinalizedVersionRange> finalizedFeatures = new HashMap<>();
@@ -4390,9 +4386,6 @@ public class KafkaAdminClient extends AdminClient {
                 final ApiVersionsResponse apiVersionsResponse = (ApiVersionsResponse) response;
                 if (apiVersionsResponse.data.errorCode() == Errors.NONE.code()) {
                     future.complete(createFeatureMetadata(apiVersionsResponse));
-                } else if (options.sendRequestToController() &&
-                           apiVersionsResponse.data.errorCode() == Errors.NOT_CONTROLLER.code()) {
-                    handleNotControllerError(Errors.NOT_CONTROLLER);
                 } else {
                     future.completeExceptionally(Errors.forCode(apiVersionsResponse.data.errorCode()).exception());
                 }
@@ -4444,6 +4437,7 @@ public class KafkaAdminClient extends AdminClient {
                 }
                 return new UpdateFeaturesRequest.Builder(
                     new UpdateFeaturesRequestData()
+                        .setExpectedFinalizedFeaturesEpoch(options.expectedFinalizedFeaturesEpoch().orElse(-1L))
                         .setTimeoutMs(timeoutMs)
                         .setFeatureUpdates(featureUpdatesRequestData));
             }

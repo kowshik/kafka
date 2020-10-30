@@ -20,10 +20,10 @@ package kafka.admin
 import kafka.server.BrokerFeatures
 import kafka.utils.{CommandDefaultOptions, CommandLineUtils, Exit}
 import org.apache.kafka.clients.CommonClientConfigs
-import org.apache.kafka.clients.admin.{Admin, DescribeFeaturesOptions, FeatureMetadata, FeatureUpdate, UpdateFeaturesOptions}
+import org.apache.kafka.clients.admin.{Admin, DescribeFeaturesOptions, FeatureUpdate, UpdateFeaturesOptions}
 import org.apache.kafka.common.feature.{Features, SupportedVersionRange}
 import org.apache.kafka.common.utils.Utils
-import java.util.Properties
+import java.util.{Optional, Properties}
 
 import scala.collection.Seq
 import scala.collection.immutable.ListMap
@@ -98,18 +98,13 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
     opts = newOpts
   }
 
-  private def describeFeatures(sendRequestToController: Boolean): FeatureMetadata = {
-    val options = new DescribeFeaturesOptions().sendRequestToController(sendRequestToController)
-    adminClient.describeFeatures(options).featureMetadata().get()
-  }
-
   /**
    * Describes the supported and finalized features. If the --from-controller CLI option
    * is provided, then the request is issued only to the controller, otherwise the request is issued
    * to any of the provided bootstrap servers.
    */
   def describeFeatures(): Unit = {
-    val result = describeFeatures(opts.hasFromControllerOption)
+    val result = adminClient.describeFeatures(new DescribeFeaturesOptions()).featureMetadata().get()
     val features = result.supportedFeatures.asScala.keys.toSet ++ result.finalizedFeatures.asScala.keys.toSet
 
     features.toList.sorted.foreach {
@@ -163,7 +158,7 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
    * @throws UpdateFeaturesException if at least one of the feature updates failed
    */
   def upgradeAllFeatures(): Unit = {
-    val metadata = describeFeatures(true)
+    val metadata = adminClient.describeFeatures(new DescribeFeaturesOptions()).featureMetadata().get()
     val existingFinalizedFeatures = metadata.finalizedFeatures
     val updates = supportedFeatures.features.asScala.map {
       case (feature, targetVersionRange) =>
@@ -194,7 +189,7 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
     }.toMap
 
     if (updates.nonEmpty) {
-      maybeApplyFeatureUpdates(updates)
+      maybeApplyFeatureUpdates(updates, metadata.finalizedFeaturesEpoch)
     }
   }
 
@@ -210,7 +205,7 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
    * @throws UpdateFeaturesException if at least one of the feature updates failed
    */
   def downgradeAllFeatures(): Unit = {
-    val metadata = describeFeatures(true)
+    val metadata = adminClient.describeFeatures(new DescribeFeaturesOptions()).featureMetadata().get()
     val existingFinalizedFeatures = metadata.finalizedFeatures
     val supportedFeaturesMap = supportedFeatures.features
     val updates = existingFinalizedFeatures.asScala.map {
@@ -242,7 +237,7 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
     }.toMap
 
     if (updates.nonEmpty) {
-      maybeApplyFeatureUpdates(updates)
+      maybeApplyFeatureUpdates(updates, metadata.finalizedFeaturesEpoch)
     }
   }
 
@@ -251,10 +246,12 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
    * only prints the expected feature updates to STDOUT without applying them.
    *
    * @param updates the feature updates to be applied via the admin client
+   * @param expectedFinalizedFeaturesEpoch the expected finalized features epoch
    *
    * @throws UpdateFeaturesException if at least one of the feature updates failed
    */
-  private def maybeApplyFeatureUpdates(updates: Map[String, (String, FeatureUpdate)]): Unit = {
+  private def maybeApplyFeatureUpdates(updates: Map[String, (String, FeatureUpdate)],
+                                       expectedFinalizedFeaturesEpoch: Optional[java.lang.Long]): Unit = {
     if (opts.hasDryRunOption) {
       println("Expected feature updates:" + ListMap(
         updates
@@ -263,11 +260,15 @@ class FeatureApis(private var opts: FeatureCommandOptions) {
           .map { case(_, (updateStr, _)) => updateStr}
           .mkString("\n"))
     } else {
+      val options = new UpdateFeaturesOptions()
+      if (expectedFinalizedFeaturesEpoch.isPresent) {
+        options.expectedFinalizedFeaturesEpoch(expectedFinalizedFeaturesEpoch.get)
+      }
       val result = adminClient.updateFeatures(
         updates
           .map { case(feature, (_, update)) => (feature, update)}
           .asJava,
-        new UpdateFeaturesOptions())
+        options)
       val resultSortedByFeature = ListMap(
         result
           .values
@@ -334,9 +335,6 @@ class FeatureCommandOptions(args: Array[String]) extends CommandDefaultOptions(a
     "Describe supported and finalized features. By default, the features are described from a" +
     " random broker. The request can be optionally directed only to the controller using the" +
     " --from-controller option.")
-  private val fromControllerOpt = parser.accepts(
-    "from-controller",
-    "Describe supported and finalized features from the controller.")
   private val upgradeAllOpt = parser.accepts(
     "upgrade-all",
     "Upgrades all finalized features to the maximum version levels known to the tool." +
@@ -358,8 +356,6 @@ class FeatureCommandOptions(args: Array[String]) extends CommandDefaultOptions(a
   def has(builder: OptionSpec[_]): Boolean = options.has(builder)
 
   def hasDescribeOption: Boolean = has(describeOpt)
-
-  def hasFromControllerOption: Boolean = has(fromControllerOpt)
 
   def hasDryRunOption: Boolean = has(dryRunOpt)
 
@@ -389,11 +385,6 @@ class FeatureCommandOptions(args: Array[String]) extends CommandDefaultOptions(a
       CommandLineUtils.printUsageAndDie(
         parser,
         "Command can contain --dry-run option only when either --upgrade-all or --downgrade-all actions are provided.")
-    }
-    if (hasFromControllerOption && !hasDescribeOption) {
-      CommandLineUtils.printUsageAndDie(
-        parser,
-        "Command can contain --from-controller option only when --describe action is provided.")
     }
   }
 }
