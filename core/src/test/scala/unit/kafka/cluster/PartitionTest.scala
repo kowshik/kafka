@@ -1837,10 +1837,9 @@ class PartitionTest extends AbstractPartitionTest {
   }
 
   private class SlowLog(log: Log, mockTime: MockTime, appendSemaphore: Semaphore) extends Log(
-    log.dir,
+    log.localLog,
     log.config,
     log.logStartOffset,
-    log.recoveryPoint,
     mockTime.scheduler,
     new BrokerTopicStats,
     log.time,

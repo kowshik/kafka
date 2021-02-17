@@ -109,13 +109,15 @@ class LogTest {
           val logDirFailureChannel: LogDirFailureChannel = new LogDirFailureChannel(1)
 
           val producerStateManager = new ProducerStateManager(topicPartition, logDir, maxPidExpirationMs)
-          val log = new Log(logDir, config, logStartOffset, logRecoveryPoint, time.scheduler, brokerTopicStats, time, maxPidExpirationMs,
+          val log = new Log(
+            new LocalLog(logDir, config, logRecoveryPoint, time.scheduler, time, topicPartition, logDirFailureChannel),
+            config, logStartOffset, time.scheduler, brokerTopicStats, time, maxPidExpirationMs,
             LogManager.ProducerIdExpirationCheckIntervalMs, topicPartition, producerStateManager, logDirFailureChannel, hadCleanShutdown) {
-            override def recoverLog(): Long = {
+            override def loadSegments(): Unit = {
               if (simulateError)
                 throw new RuntimeException
               cleanShutdownInterceptedValue = hadCleanShutdown
-              super.recoverLog()
+              super.loadSegments()
             }
           }
           log
@@ -1021,12 +1023,9 @@ class LogTest {
       val maxProducerIdExpirationMs = 60 * 60 * 1000
       val topicPartition = Log.parseTopicPartitionName(logDir)
       val producerStateManager = new ProducerStateManager(topicPartition, logDir, maxProducerIdExpirationMs)
-
+      val logDirFailureChannel = new LogDirFailureChannel(10)
       // Intercept all segment read calls
-      new Log(logDir, logConfig, logStartOffset = 0, recoveryPoint = recoveryPoint, mockTime.scheduler,
-        brokerTopicStats, mockTime, maxProducerIdExpirationMs, LogManager.ProducerIdExpirationCheckIntervalMs,
-        topicPartition, producerStateManager, new LogDirFailureChannel(10), hadCleanShutdown = false) {
-
+      val localLog = new LocalLog(logDir, logConfig, recoveryPoint, mockTime.scheduler, mockTime, topicPartition, logDirFailureChannel) {
         override def addSegment(segment: LogSegment): LogSegment = {
           val wrapper = new LogSegment(segment.log, segment.lazyOffsetIndex, segment.lazyTimeIndex, segment.txnIndex, segment.baseOffset,
             segment.indexIntervalBytes, segment.rollJitterMs, mockTime) {
@@ -1045,6 +1044,11 @@ class LogTest {
           super.addSegment(wrapper)
         }
       }
+
+      new Log(localLog,
+        logConfig, logStartOffset = 0, mockTime.scheduler,
+        brokerTopicStats, mockTime, maxProducerIdExpirationMs, LogManager.ProducerIdExpirationCheckIntervalMs,
+        topicPartition, producerStateManager, logDirFailureChannel, hadCleanShutdown = false)
     }
 
     // Retain snapshots for the last 2 segments
@@ -1116,18 +1120,20 @@ class LogTest {
     EasyMock.replay(stateManager)
 
     val config = LogConfig(new Properties())
-    val log = new Log(logDir,
+    val logDirFailureChannel = new LogDirFailureChannel(1)
+    val topicPartition = Log.parseTopicPartitionName(logDir)
+    val log = new Log(
+      new LocalLog(logDir, config, 0L, mockTime.scheduler, mockTime, topicPartition, logDirFailureChannel),
       config,
       logStartOffset = 0L,
-      recoveryPoint = 0L,
       scheduler = mockTime.scheduler,
       brokerTopicStats = brokerTopicStats,
       time = mockTime,
       maxProducerIdExpirationMs = 300000,
       producerIdExpirationCheckIntervalMs = 30000,
-      topicPartition = Log.parseTopicPartitionName(logDir),
+      topicPartition,
       producerStateManager = stateManager,
-      logDirFailureChannel = new LogDirFailureChannel(1),
+      logDirFailureChannel,
       hadCleanShutdown = false)
 
     EasyMock.verify(stateManager)
@@ -1195,16 +1201,16 @@ class LogTest {
     val logProps = new Properties()
     logProps.put(LogConfig.MessageFormatVersionProp, "0.10.2")
     val config = LogConfig(logProps)
-    new Log(logDir,
+    val topicPartition = Log.parseTopicPartitionName(logDir)
+    new Log(new LocalLog(logDir, config, 0L, mockTime.scheduler, mockTime, topicPartition, null),
       config,
       logStartOffset = 0L,
-      recoveryPoint = 0L,
       scheduler = mockTime.scheduler,
       brokerTopicStats = brokerTopicStats,
       time = mockTime,
       maxProducerIdExpirationMs = 300000,
       producerIdExpirationCheckIntervalMs = 30000,
-      topicPartition = Log.parseTopicPartitionName(logDir),
+      topicPartition,
       producerStateManager = stateManager,
       logDirFailureChannel = null)
 
@@ -1233,10 +1239,10 @@ class LogTest {
     val logProps = new Properties()
     logProps.put(LogConfig.MessageFormatVersionProp, "0.10.2")
     val config = LogConfig(logProps)
-    new Log(logDir,
+    val topicPartition = Log.parseTopicPartitionName(logDir)
+    new Log(new LocalLog(logDir, config, 0L, mockTime.scheduler, mockTime, topicPartition, null),
       config,
       logStartOffset = 0L,
-      recoveryPoint = 0L,
       scheduler = mockTime.scheduler,
       brokerTopicStats = brokerTopicStats,
       time = mockTime,
@@ -1273,10 +1279,10 @@ class LogTest {
     val logProps = new Properties()
     logProps.put(LogConfig.MessageFormatVersionProp, "0.11.0")
     val config = LogConfig(logProps)
-    new Log(logDir,
+    val topicPartition = Log.parseTopicPartitionName(logDir)
+    new Log(new LocalLog(logDir, config, 0L, mockTime.scheduler, mockTime, topicPartition, null),
       config,
       logStartOffset = 0L,
-      recoveryPoint = 0L,
       scheduler = mockTime.scheduler,
       brokerTopicStats = brokerTopicStats,
       time = mockTime,

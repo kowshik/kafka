@@ -102,17 +102,18 @@ class LogCleanerTest {
     logProps.put(LogConfig.CleanupPolicyProp, LogConfig.Compact + "," + LogConfig.Delete)
     val topicPartition = Log.parseTopicPartitionName(dir)
     val producerStateManager = new ProducerStateManager(topicPartition, dir)
-    val log = new Log(dir,
-                      config = LogConfig.fromProps(logConfig.originals, logProps),
+    val config = LogConfig.fromProps(logConfig.originals, logProps)
+    val logDirFailureChannel = new LogDirFailureChannel(10)
+    val log = new Log(new LocalLog(dir, config, 0L, time.scheduler, time, topicPartition, logDirFailureChannel),
+                      config,
                       logStartOffset = 0L,
-                      recoveryPoint = 0L,
                       scheduler = time.scheduler,
                       brokerTopicStats = new BrokerTopicStats, time,
                       maxProducerIdExpirationMs = 60 * 60 * 1000,
                       producerIdExpirationCheckIntervalMs = LogManager.ProducerIdExpirationCheckIntervalMs,
                       topicPartition = topicPartition,
                       producerStateManager = producerStateManager,
-                      logDirFailureChannel = new LogDirFailureChannel(10)) {
+                      logDirFailureChannel) {
       override def replaceSegments(newSegments: Seq[LogSegment], oldSegments: Seq[LogSegment], isRecoveredSwapFile: Boolean = false): Unit = {
         deleteStartLatch.countDown()
         if (!deleteCompleteLatch.await(5000, TimeUnit.MILLISECONDS)) {

@@ -1447,7 +1447,7 @@ class ReplicaManagerTest {
    * 'leaderEpochInLeaderAndIsr' leader epoch for partition 'topicPartition'.
    */
   private def prepareReplicaManagerAndLogManager(timer: MockTimer,
-                                                 topicPartition: Int,
+                                                 partition: Int,
                                                  leaderEpochInLeaderAndIsr: Int,
                                                  followerBrokerId: Int,
                                                  leaderBrokerId: Int,
@@ -1464,20 +1464,24 @@ class ReplicaManagerTest {
 
     val mockScheduler = new MockScheduler(time)
     val mockBrokerTopicStats = new BrokerTopicStats
+    val logConfig = LogConfig()
     val mockLogDirFailureChannel = new LogDirFailureChannel(config.logDirs.size)
+    val topicPartition = new TopicPartition(topic, partition)
     val mockLog = new Log(
-      _dir = new File(new File(config.logDirs.head), s"$topic-0"),
-      config = LogConfig(),
+      new LocalLog(new File(new File(config.logDirs.head), s"$topic-0"),
+      logConfig, 0L, time.scheduler, time, topicPartition, mockLogDirFailureChannel),
+      logConfig,
       logStartOffset = 0L,
-      recoveryPoint = 0L,
       scheduler = mockScheduler,
       brokerTopicStats = mockBrokerTopicStats,
       time = time,
       maxProducerIdExpirationMs = 30000,
       producerIdExpirationCheckIntervalMs = 30000,
-      topicPartition = new TopicPartition(topic, topicPartition),
-      producerStateManager = new ProducerStateManager(new TopicPartition(topic, topicPartition),
-        new File(new File(config.logDirs.head), s"$topic-$topicPartition"), 30000),
+      topicPartition,
+      producerStateManager = new ProducerStateManager(
+        topicPartition,
+        new File(new File(config.logDirs.head), topicPartition.toString),
+        30000),
       logDirFailureChannel = mockLogDirFailureChannel) {
 
       override def endOffsetForEpoch(leaderEpoch: Int): Option[OffsetAndEpoch] = {
@@ -1496,7 +1500,7 @@ class ReplicaManagerTest {
     }
 
     // Expect to call LogManager.truncateTo exactly once
-    val topicPartitionObj = new TopicPartition(topic, topicPartition)
+    val topicPartitionObj = new TopicPartition(topic, partition)
     val mockLogMgr: LogManager = EasyMock.createMock(classOf[LogManager])
     EasyMock.expect(mockLogMgr.liveLogDirs).andReturn(config.logDirs.map(new File(_).getAbsoluteFile)).anyTimes
     EasyMock.expect(mockLogMgr.getOrCreateLog(EasyMock.eq(topicPartitionObj),
@@ -1572,7 +1576,7 @@ class ReplicaManagerTest {
                 val initialOffset = InitialFetchState(
                   leader = new BrokerEndPoint(0, "localhost", 9092),
                   initOffset = 0L, currentLeaderEpoch = leaderEpochInLeaderAndIsr)
-                addPartitions(Map(new TopicPartition(topic, topicPartition) -> initialOffset))
+                addPartitions(Map(new TopicPartition(topic, partition) -> initialOffset))
                 super.doWork()
 
                 // Shut the thread down after one iteration to avoid double-counting truncations
