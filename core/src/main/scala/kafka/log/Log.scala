@@ -1391,10 +1391,27 @@ class Log(val localLog: LocalLog,
    */
   def logEndOffsetMetadata: LogOffsetMetadata = localLog.logEndOffsetMetadata
 
+  private val rollAction = RollAction(
+      (newOffset: Long) => {
+        // take a snapshot of the producer state to facilitate recovery. It is useful to have the snapshot
+        // offset align with the new segment offset since this ensures we can recover the segment by beginning
+        // with the corresponding snapshot file and scanning the segment data. Because the segment base offset
+        // may actually be ahead of the current producer state end offset (which corresponds to the log end offset),
+        // we manually override the state offset here prior to taking the snapshot.
+        producerStateManager.updateMapEndOffset(newOffset)
+        producerStateManager.takeSnapshot()
+      },
+      (newSegment: LogSegment, deletedSegment: Option[LogSegment]) => {
+        deletedSegment.foreach(segment => scheduleProducerSnapshotDeletion(Seq(segment)))
+        updateHighWatermarkWithLogEndOffset()
+        // schedule an asynchronous flush of the old segment
+        scheduler.schedule("flush-log", () => flush(newSegment.baseOffset))
+      }
+    )
+
   private def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo): LogSegment = {
     lock synchronized {
-      val rollResultOpt = localLog.maybeRoll(messagesSize, appendInfo, producerStateManager)
-      rollResultOpt.map(result => afterRoll(result)).getOrElse(activeSegment)
+      localLog.maybeRoll(messagesSize, appendInfo, rollAction)
     }
   }
 
@@ -1406,20 +1423,8 @@ class Log(val localLog: LocalLog,
    */
   def roll(expectedNextOffset: Option[Long] = None): LogSegment = {
     lock synchronized {
-      val rollResult = localLog.roll(expectedNextOffset, producerStateManager)
-      afterRoll(rollResult)
+      localLog.roll(expectedNextOffset, rollAction)
     }
-  }
-
-  private def afterRoll(rollResult: RollResult): LogSegment = {
-    rollResult.deletedSegment.foreach(segment => scheduleProducerSnapshotDeletion(Seq(segment)))
-
-    updateHighWatermarkWithLogEndOffset()
-
-    // schedule an asynchronous flush of the old segment
-    scheduler.schedule("flush-log", () => flush(rollResult.newSegment.baseOffset), delay = 0L)
-
-    rollResult.newSegment
   }
 
   /**

@@ -24,6 +24,9 @@ import scala.jdk.CollectionConverters._
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.collection.{Seq, Set, mutable}
 
+// Used to define pre/post roll actions to be performed.
+case class RollAction(preRollAction: Long => Unit, postRollAction: (LogSegment, Option[LogSegment]) => Unit)
+
 // Used to hold the result of rolling a LocalLog instance
 case class RollResult(deletedSegment: Option[LogSegment], newSegment: LogSegment)
 
@@ -1065,13 +1068,11 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @param messagesSize The messages set size in bytes.
    * @param appendInfo log append information
+   * @param rollAction The pre/post roll actions to be performed
    *
-   * @return - if the log was rolled, then returns a RollResult containing the following:
-   *           - the segment that was deleted, none otherwise.
-   *           - the new segment
-   *         - otherwise, returns none.
+   * @return  The currently active segment after (perhaps) rolling to a new segment
    */
-  private[log] def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo, producerStateManager: ProducerStateManager): Option[RollResult] = {
+  private[log] def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo, rollAction: RollAction): LogSegment = {
     val segment = activeSegment
     val now = time.milliseconds
 
@@ -1101,9 +1102,9 @@ class LocalLog(@volatile private var _dir: File,
         .map(_.messageOffset)
         .getOrElse(maxOffsetInMessages - Integer.MAX_VALUE)
 
-      Some(roll(Some(rollOffset), producerStateManager))
+      roll(Some(rollOffset), rollAction)
     } else {
-      Option.empty
+      segment
     }
   }
 
@@ -1111,9 +1112,9 @@ class LocalLog(@volatile private var _dir: File,
    * Roll the log over to a new active segment starting with the current logEndOffset.
    * This will trim the index to the exact size of the number of entries it currently contains.
    *
-   * @return a RollResult containing the deleted segment (if any) and the newly rolled segment
+   * @return The newly rolled segment
    */
-  def roll(expectedNextOffset: Option[Long] = None, producerStateManager: ProducerStateManager): RollResult = {
+  def roll(expectedNextOffset: Option[Long] = None, rollAction: RollAction): LogSegment = {
     maybeHandleIOException(s"Error while rolling log segment for $topicPartition in dir ${dir.getParent}") {
       val start = time.hiResClockMs()
       checkIfMemoryMappedBufferClosed()
@@ -1155,13 +1156,7 @@ class LocalLog(@volatile private var _dir: File,
         Option.empty
       }
 
-      // take a snapshot of the producer state to facilitate recovery. It is useful to have the snapshot
-      // offset align with the new segment offset since this ensures we can recover the segment by beginning
-      // with the corresponding snapshot file and scanning the segment data. Because the segment base offset
-      // may actually be ahead of the current producer state end offset (which corresponds to the log end offset),
-      // we manually override the state offset here prior to taking the snapshot.
-      producerStateManager.updateMapEndOffset(newOffset)
-      producerStateManager.takeSnapshot()
+      rollAction.preRollAction(newOffset)
 
       val segment = LogSegment.open(dir,
         baseOffset = newOffset,
@@ -1177,7 +1172,9 @@ class LocalLog(@volatile private var _dir: File,
 
       info(s"Rolled new log segment at offset $newOffset in ${time.hiResClockMs() - start} ms.")
 
-      RollResult(deleted, segment)
+      rollAction.postRollAction(segment, deleted)
+
+      segment
     }
   }
 
