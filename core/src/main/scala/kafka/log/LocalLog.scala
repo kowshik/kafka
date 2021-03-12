@@ -1,3 +1,19 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package kafka.log
 
 import java.io.{File, IOException}
@@ -27,23 +43,20 @@ import scala.collection.{Seq, Set, mutable}
 // Used to define pre/post roll actions to be performed.
 case class RollAction(preRollAction: Long => Unit, postRollAction: (LogSegment, Option[LogSegment]) => Unit)
 
-// Used to hold the result of rolling a LocalLog instance
-case class RollResult(deletedSegment: Option[LogSegment], newSegment: LogSegment)
-
 // Used to hold the result of splitting a segment into one or more segments, see LocalLog#splitOverflowedSegment
 case class SplitSegmentResult(deletedSegments: Seq[LogSegment], newSegments: Seq[LogSegment])
 
 /**
- * An append-only log for storing messages.
- *
+ * An append-only log for storing messages locally.
  * The log is a sequence of LogSegments, each with a base offset denoting the first message in the segment.
- *
  * New log segments are created according to a configurable policy that controls the size in bytes or time interval
  * for a given segment.
  *
+ * NOTE: this class is not thread-safe, and it relies on the thread safety provided by the Log class.
+ *
  * @param _dir The directory in which log segments are created.
  * @param config The log configuration settings
- * @param recoveryPoint The offset at which to begin recovery--i.e. the first offset which has not been flushed to disk
+ * @param recoveryPoint The offset at which to begin recovery i.e. the first offset which has not been flushed to disk
  * @param scheduler The thread pool scheduler used for background actions
  * @param time The time instance used for checking the clock
  * @param topicPartition The topic partition associated with this log
@@ -74,17 +87,18 @@ class LocalLog(@volatile private var _dir: File,
   /* last time the log was flushed */
   private val lastFlushedTime = new AtomicLong(time.milliseconds)
 
+  // The offset where the next message could be appended
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   // Log dir failure is handled asynchronously we need to prevent threads
   // from reading inconsistent state caused by a failure in another thread
-  @volatile private var logDirOffline = false
+  @volatile private[log] var logDirOffline = false
 
-  /* the actual segments of the log */
+  // The actual segments of the log
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   locally {
-    // create the log directory if it doesn't exist
+    // Create the log directory if it doesn't exist
     Files.createDirectories(dir.toPath)
   }
 
@@ -107,7 +121,7 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * Rename the directory of the log
-   *
+   * @param name the new dir name
    * @throws KafkaStorageException if rename fails
    */
   private[log] def renameDir(name: String): Boolean = {
@@ -139,7 +153,7 @@ class LocalLog(@volatile private var _dir: File,
       throw new KafkaStorageException(s"The memory mapped buffer for log of $topicPartition is already closed")
   }
 
-  private def checkForLogDirFailure(): Unit = {
+  private[log] def checkForLogDirFailure(): Unit = {
     if (logDirOffline) {
       throw new KafkaStorageException(s"The log dir $parentDir is offline due to a previous IO exception.")
     }
@@ -185,14 +199,13 @@ class LocalLog(@volatile private var _dir: File,
    */
   private[log] def updateLogEndOffset(endOffset: Long): Unit = {
     nextOffsetMetadata = LogOffsetMetadata(endOffset, activeSegment.baseOffset, activeSegment.size)
-
     if (recoveryPoint > endOffset) {
       updateRecoveryPoint(endOffset)
     }
   }
 
   /**
-   * @return the base offset of the first local segment
+   * @return the base offset of the first local segment, if it exists
    */
   private[log] def firstSegmentBaseOffset: Option[Long] = Option(segments.firstEntry).map(_.getValue.baseOffset)
 
@@ -315,8 +328,13 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * Load the log segments from the log files on disk and update the next offset.
-   * This method does not need to convert IOException to KafkaStorageException because it is only called before all logs
+   * This method does not need to convert IOException to KafkaStorageException because it is usually called before all logs
    * are loaded.
+   *
+   * @param logStartOffset the log start offset
+   * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
+   * @param producerStateManager The ProducerStateManager instance
+   * @param leaderEpochCache The LeaderEpochFileCache instance
    *
    * @return the list of deleted segments
    *
@@ -378,8 +396,13 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * Recover the log segments and return the next offset after recovery.
-   * This method does not need to convert IOException to KafkaStorageException because it is only called before all
+   * This method does not need to convert IOException to KafkaStorageException because it is usually called before all
    * logs are loaded.
+   *
+   * @param logStartOffset the log start offset
+   * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
+   * @param producerStateManager The ProducerStateManager instance
+   * @param leaderEpochCache The LeaderEpochFileCache instance
    *
    * @return the list of deleted segments and the next offset
    *
@@ -474,6 +497,10 @@ class LocalLog(@volatile private var _dir: File,
    * It is possible that we encounter a segment with index offset overflow in which case the LogSegmentOffsetOverflowException
    * will be thrown. Note that any segments that were opened before we encountered the exception will remain open and the
    * caller is responsible for closing them appropriately, if needed.
+   *
+   * @param logStartOffset the log start offset
+   * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
+   *
    * @throws LogSegmentOffsetOverflowException if the log directory contains a segment with messages that overflow the index offset
    */
   private[log] def loadSegmentFiles(logStartOffset: Long, maxProducerIdExpirationMs: Int): Unit = {
@@ -516,15 +543,20 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * Recover the given segment.
+   *
+   * @param logStartOffset the log start offset
    * @param segment Segment to recover
+   * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
    * @param leaderEpochCache Optional cache for updating the leader epoch during recovery
+   *
    * @return The number of bytes truncated from the segment
+   *
    * @throws LogSegmentOffsetOverflowException if the segment contains messages that cause index offset overflow
    */
   private[log] def recoverSegment(logStartOffset: Long,
-                             segment: LogSegment,
-                             maxProducerIdExpirationMs: Int,
-                             leaderEpochCache: Option[LeaderEpochFileCache] = None): Int = {
+                                  segment: LogSegment,
+                                  maxProducerIdExpirationMs: Int,
+                                  leaderEpochCache: Option[LeaderEpochFileCache] = None): Int = {
     val producerStateManager = new ProducerStateManager(topicPartition, dir, maxProducerIdExpirationMs)
     rebuildProducerState(logStartOffset, segment.baseOffset, reloadFromCleanShutdown = false, producerStateManager)
     val bytesTruncated = segment.recover(producerStateManager, leaderEpochCache)
@@ -545,8 +577,8 @@ class LocalLog(@volatile private var _dir: File,
    *                                           and manual intervention might be required to get out of it.
    */
   private[log] def completeSwapOperations(swapFiles: Set[File],
-                                     logStartOffset: Long,
-                                     maxProducerIdExpirationMs: Int): Seq[LogSegment] = {
+                                          logStartOffset: Long,
+                                          maxProducerIdExpirationMs: Int): Seq[LogSegment] = {
     val deletedSegments = ListBuffer[LogSegment]()
     for (swapFile <- swapFiles) {
       val logFile = new File(CoreUtils.replaceSuffix(swapFile.getPath, SwapFileSuffix, ""))
@@ -844,7 +876,7 @@ class LocalLog(@volatile private var _dir: File,
    * @throws IOException if the segment files can't be renamed and still exists
    */
   private[log] def deleteSegmentFiles(segments: Iterable[LogSegment],
-                                 asyncDelete: Boolean): Unit = {
+                                      asyncDelete: Boolean): Unit = {
     segments.foreach(_.changeFileSuffixes("", Log.DeletedFileSuffix))
 
     def deleteSegments(): Unit = {
@@ -895,7 +927,7 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   private[log] def emptyFetchDataInfo(fetchOffsetMetadata: LogOffsetMetadata,
-                                 includeAbortedTxns: Boolean): FetchDataInfo = {
+                                      includeAbortedTxns: Boolean): FetchDataInfo = {
     val abortedTransactions =
       if (includeAbortedTxns) Some(List.empty[FetchResponseData.AbortedTransaction])
       else None
@@ -1212,9 +1244,9 @@ class LocalLog(@volatile private var _dir: File,
   // free of all side-effects, i.e. it must not update any log-specific state.
   // TODO: Move it else where?
   def rebuildProducerState(logStartOffset: Long,
-                                   lastOffset: Long,
-                                   reloadFromCleanShutdown: Boolean,
-                                   producerStateManager: ProducerStateManager): Unit = {
+                           lastOffset: Long,
+                           reloadFromCleanShutdown: Boolean,
+                           producerStateManager: ProducerStateManager): Unit = {
     checkIfMemoryMappedBufferClosed()
     val segments = logSegments
     val offsetsToSnapshot =

@@ -208,19 +208,19 @@ case object SnapshotGenerated extends LogStartOffsetIncrementReason {
 }
 
 /**
- * A log which presents a combined view of local and tiered log segments.
+ * A log which presents a unified view of local and tiered log segments.
  *
  * The log consists of tiered and local segments with the tiered portion of the log being optional. There could be an
- * overlap between the tiered and local segments, which does not align one-to-one. The active segment is always guaranteed
- * to be local. If tiered segments are present, they always appear at the head of the log, followed by an optional
- * region of overlap, followed by the local segments including the active segment.
+ * overlap between the tiered and local segments. The active segment is always guaranteed to be local. If tiered segments
+ * are present, they always appear at the head of the log, followed by an optional region of overlap, followed by the local
+ * segments including the active segment.
  *
- * NOTE: this class handles state and behavior specific to tiered segments as well as any behavior combining both types of
- * segments. The state and behavior specific to local segments is handled by the LocalLog instance.
+ * NOTE: this class handles state and behavior specific to tiered segments as well as any behavior combining both tiered
+ * and local segments. The state and behavior specific to local segments is handled by the encapsulated LocalLog instance.
  *
  * @param localLog The LocalLog instance
  * @param config The log configuration settings
- * @param logStartOffset Start offset of the combined log. This is the earliest offset allowed to be exposed to a kafka client.
+ * @param logStartOffset Start offset of the unified log. This is the earliest offset allowed to be exposed to a kafka client.
  *                       LocalLog only maintains the local segments, and therefore the start offset could thus diverge from
  *                       the true start offset. The logStartOffset can be updated by :
  *                       - user's DeleteRecordsRequest
@@ -229,9 +229,9 @@ case object SnapshotGenerated extends LogStartOffsetIncrementReason {
  *                       The logStartOffset is used to decide the following:
  *                       - Log deletion. LogSegment whose nextOffset <= log's logStartOffset can be deleted.
  *                         It may trigger log rolling if the active segment is deleted.
- *                       - Earliest offset of the log in response to ListOffsetRequest. To avoid OffsetOutOfRange exception after user seeks to earliest offset,
- *                         we make sure that logStartOffset <= log's highWatermark
- *                       Other activities such as log cleaning are not affected by logStartOffset.
+ *                       - Earliest offset of the log in response to ListOffsetRequest. To avoid OffsetOutOfRange exception after
+ *                         user seeks to earliest offset, we make sure that logStartOffset <= log's highWatermark.
+ *                         Other activities such as log cleaning are not affected by logStartOffset.
  * @param scheduler The thread pool scheduler used for background actions
  * @param brokerTopicStats Container for Broker Topic Yammer Metrics
  * @param time The time instance used for checking the clock
@@ -636,7 +636,7 @@ class Log(val localLog: LocalLog,
     lock synchronized {
       localLog.checkIfMemoryMappedBufferClosed()
       producerExpireCheck.cancel(true)
-      localLog.maybeHandleIOException(s"Error while renaming dir for $topicPartition in dir ${dir.getParent}") {
+      maybeHandleIOException(s"Error while renaming dir for $topicPartition in dir ${dir.getParent}") {
         // We take a snapshot at the last written offset to hopefully avoid the need to scan the log
         // after restarting and to ensure that we cannot inadvertently hit the upgrade optimization
         // (the clean shutdown file is written after the logs are all closed).
@@ -653,7 +653,7 @@ class Log(val localLog: LocalLog,
    */
   def renameDir(name: String): Unit = {
     lock synchronized {
-      localLog.maybeHandleIOException(s"Error while renaming dir for $topicPartition in log dir ${dir.getParent}") {
+      maybeHandleIOException(s"Error while renaming dir for $topicPartition in log dir ${dir.getParent}") {
         if (localLog.renameDir(name)) {
           producerStateManager.updateParentDir(dir)
           // re-initialize leader epoch cache so that LeaderEpochCheckpointFile.checkpoint can correctly reference
@@ -744,7 +744,7 @@ class Log(val localLog: LocalLog,
 
       // they are valid, insert them in the log
       lock synchronized {
-        localLog.maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+        maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
           localLog.checkIfMemoryMappedBufferClosed()
           if (validateAndAssignOffsets) {
             // assign offsets to the message set
@@ -957,7 +957,7 @@ class Log(val localLog: LocalLog,
     // The deleteRecordsOffset may be lost only if all in-sync replicas of this broker are shutdown
     // in an unclean manner within log.flush.start.offset.checkpoint.interval.ms. The chance of this happening is low.
     var updatedLogStartOffset = false
-    localLog.maybeHandleIOException(s"Exception while increasing log start offset for $topicPartition to $newLogStartOffset in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Exception while increasing log start offset for $topicPartition to $newLogStartOffset in dir ${dir.getParent}") {
       lock synchronized {
         if (newLogStartOffset > highWatermark)
           throw new OffsetOutOfRangeException(s"Cannot increment the log start offset to $newLogStartOffset of partition $topicPartition " +
@@ -1188,7 +1188,7 @@ class Log(val localLog: LocalLog,
    *         None if no such message is found.
    */
   def fetchOffsetByTimestamp(targetTimestamp: Long): Option[TimestampAndOffset] = {
-    localLog.maybeHandleIOException(s"Error while fetching offset by timestamp for $topicPartition in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Error while fetching offset by timestamp for $topicPartition in dir ${dir.getParent}") {
       debug(s"Searching offset for timestamp $targetTimestamp")
 
       if (config.messageFormatVersion < KAFKA_0_10_0_IV0 &&
@@ -1306,7 +1306,7 @@ class Log(val localLog: LocalLog,
   }
 
   private def deleteSegments(deletable: Iterable[LogSegment], reason: SegmentDeletionReason): Int = {
-    localLog.maybeHandleIOException(s"Error while deleting segments for $topicPartition in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Error while deleting segments for $topicPartition in dir ${dir.getParent}") {
       val numToDelete = deletable.size
       if (numToDelete > 0) {
         // we must always have at least one segment, so if we are going to delete all the segments, create a new one first
@@ -1443,7 +1443,7 @@ class Log(val localLog: LocalLog,
    * @param offset The offset to flush up to (non-inclusive); the new recovery point
    */
   def flush(offset: Long): Unit = {
-    localLog.maybeHandleIOException(s"Error while flushing log for $topicPartition in dir ${dir.getParent} with offset $offset") {
+    maybeHandleIOException(s"Error while flushing log for $topicPartition in dir ${dir.getParent} with offset $offset") {
       if (offset > localLog.recoveryPoint) {
         info(s"Flushing log up to offset $offset, last flushed: $lastFlushTime,  current time: ${time.milliseconds()}, " +
           s"unflushed: $unflushedMessages")
@@ -1460,7 +1460,7 @@ class Log(val localLog: LocalLog,
    * Completely delete the local log directory and all contents from the file system with no delay
    */
   private[log] def delete(): Unit = {
-    localLog.maybeHandleIOException(s"Error while deleting log for $topicPartition in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Error while deleting log for $topicPartition in dir ${dir.getParent}") {
       lock synchronized {
         producerExpireCheck.cancel(true)
         leaderEpochCache.foreach(_.clear())
@@ -1498,7 +1498,7 @@ class Log(val localLog: LocalLog,
    * @return True iff targetOffset < logEndOffset
    */
   private[kafka] def truncateTo(targetOffset: Long): Boolean = {
-    localLog.maybeHandleIOException(s"Error while truncating log to offset $targetOffset for $topicPartition in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Error while truncating log to offset $targetOffset for $topicPartition in dir ${dir.getParent}") {
       if (targetOffset < 0)
         throw new IllegalArgumentException(s"Cannot truncate partition $topicPartition to a negative offset (%d).".format(targetOffset))
       if (targetOffset >= localLog.logEndOffset) {
@@ -1540,7 +1540,7 @@ class Log(val localLog: LocalLog,
    *  @param newOffset The new offset to start the log with
    */
   def truncateFullyAndStartAt(newOffset: Long): Unit = {
-    localLog.maybeHandleIOException(s"Error while truncating the entire log for $topicPartition in dir ${dir.getParent}") {
+    maybeHandleIOException(s"Error while truncating the entire log for $topicPartition in dir ${dir.getParent}") {
       debug(s"Truncate and start at offset $newOffset")
       lock synchronized {
         val deletedSegments = localLog.truncateFullyAndStartAt(newOffset)
@@ -1705,9 +1705,21 @@ class Log(val localLog: LocalLog,
   @threadsafe
   private[log] def addSegment(segment: LogSegment): LogSegment = localLog.addSegment(segment)
 
+  private def maybeHandleIOException[T](msg: => String)(fun: => T): T = {
+    try {
+      localLog.checkForLogDirFailure()
+      fun
+    } catch {
+      case e: IOException =>
+        localLog.logDirOffline = true
+        logDirFailureChannel.maybeAddOfflineLogDir(dir.getParent, msg, e)
+        throw new KafkaStorageException(msg, e)
+    }
+  }
+
   def scheduleProducerSnapshotDeletion(segments: Seq[LogSegment]): Unit = {
     def deleteProducerSnapshots(segments: Seq[LogSegment]): Unit = {
-      localLog.maybeHandleIOException(s"Error while deleting producer state snapshots for $topicPartition in dir ${dir.getParent}") {
+      maybeHandleIOException(s"Error while deleting producer state snapshots for $topicPartition in dir ${dir.getParent}") {
         segments.foreach {
           segment => producerStateManager.removeAndDeleteSnapshot(segment.baseOffset)
         }
