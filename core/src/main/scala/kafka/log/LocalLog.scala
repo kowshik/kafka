@@ -348,7 +348,7 @@ class LocalLog(@volatile private var _dir: File,
     // Finally, complete any interrupted swap operations. To be crash-safe,
     // log files that are replaced by the swap segment should be renamed to .deleted
     // before the swap file is restored as the new segment file.
-    deletedSegments.addAll(completeSwapOperations(swapFiles, logStartOffset, maxProducerIdExpirationMs))
+    deletedSegments ++= completeSwapOperations(swapFiles, logStartOffset, maxProducerIdExpirationMs)
 
     if (!dir.getAbsolutePath.endsWith(DeleteDirSuffix)) {
       val (deleted, nextOffset) = retryOnOffsetOverflow(
@@ -358,7 +358,7 @@ class LocalLog(@volatile private var _dir: File,
                      producerStateManager,
                      leaderEpochCache)
         })
-      deletedSegments.addAll(deleted)
+      deletedSegments ++= deleted
 
       // reset the index size of the currently active log segment to allow more entries
       activeSegment.resizeIndexes(config.maxIndexSize)
@@ -401,7 +401,7 @@ class LocalLog(@volatile private var _dir: File,
             "This could happen if segment files were deleted from the file system.")
           val toDelete = logSegments.toList
           removeAndDeleteSegments(logSegments, asyncDelete = true, LogRecovery)
-          deleted.addAll(toDelete)
+          deleted ++= toDelete
           leaderEpochCache.foreach(_.clearAndFlush())
           producerStateManager.truncateFullyAndStartAt(logStartOffset)
           None
@@ -434,7 +434,7 @@ class LocalLog(@volatile private var _dir: File,
           removeAndDeleteSegments(toDelete,
                                   asyncDelete = true,
                                   reason = LogRecovery)
-          deleted.addAll(toDelete)
+          deleted ++= toDelete
           truncated = true
         }
       }
@@ -571,7 +571,7 @@ class LocalLog(@volatile private var _dir: File,
         segment.readNextOffset > swapSegment.baseOffset
       }
       val deleted = replaceSegments(Seq(swapSegment), oldSegments.toSeq, isRecoveredSwapFile = true)
-      deletedSegments.addAll(deleted)
+      deletedSegments ++= deleted
     }
     deletedSegments.toSeq
   }
