@@ -1242,7 +1242,6 @@ class LocalLog(@volatile private var _dir: File,
 
   // Rebuild producer state until lastOffset. This method may be called from the recovery code path, and thus must be
   // free of all side-effects, i.e. it must not update any log-specific state.
-  // TODO: Move it else where?
   def rebuildProducerState(logStartOffset: Long,
                            lastOffset: Long,
                            reloadFromCleanShutdown: Boolean,
