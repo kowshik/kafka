@@ -27,7 +27,6 @@ import java.util.regex.Pattern
 
 import kafka.common.LogSegmentOffsetOverflowException
 import kafka.metrics.KafkaMetricsGroup
-import kafka.server.epoch.LeaderEpochFileCache
 import kafka.server.{FetchDataInfo, LogDirFailureChannel, LogOffsetMetadata}
 import kafka.utils.{CoreUtils, Logging, Scheduler, threadsafe}
 import org.apache.kafka.common.{KafkaException, TopicPartition}
@@ -270,7 +269,7 @@ class LocalLog(@volatile private var _dir: File,
    * Get the largest log segment with a base offset less than or equal to the given offset, if one exists.
    * @return the optional log segment
    */
-  private[log]  def floorLogSegment(offset: Long): Option[LogSegment] = {
+  private[log] def floorLogSegment(offset: Long): Option[LogSegment] = {
     Option(segments.floorEntry(offset)).map(_.getValue)
   }
 
@@ -333,8 +332,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @param logStartOffset the log start offset
    * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
-   * @param producerStateManager The ProducerStateManager instance
-   * @param leaderEpochCache The LeaderEpochFileCache instance
+   * @param recoverSegmentCallback Callback to invoke when attempting to recover a segment
    *
    * @return the list of deleted segments
    *
@@ -343,8 +341,7 @@ class LocalLog(@volatile private var _dir: File,
    */
   private[log] def loadSegments(logStartOffset: Long,
                                 maxProducerIdExpirationMs: Int,
-                                producerStateManager: ProducerStateManager,
-                                leaderEpochCache: Option[LeaderEpochFileCache]): Seq[LogSegment] = {
+                                recoverSegmentCallback: LogSegment => Int): Seq[LogSegment] = {
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
     val swapFiles = removeTempFilesAndCollectSwapFiles()
@@ -358,7 +355,7 @@ class LocalLog(@volatile private var _dir: File,
       // call to loadSegmentFiles().
       logSegments.foreach(_.close())
       segments.clear()
-      loadSegmentFiles(logStartOffset, maxProducerIdExpirationMs)
+      loadSegmentFiles(logStartOffset, maxProducerIdExpirationMs, recoverSegmentCallback)
     })
 
     val deletedSegments = ListBuffer[LogSegment]()
@@ -366,16 +363,12 @@ class LocalLog(@volatile private var _dir: File,
     // Finally, complete any interrupted swap operations. To be crash-safe,
     // log files that are replaced by the swap segment should be renamed to .deleted
     // before the swap file is restored as the new segment file.
-    deletedSegments ++= completeSwapOperations(swapFiles, logStartOffset, maxProducerIdExpirationMs)
+    deletedSegments ++= completeSwapOperations(swapFiles, logStartOffset, maxProducerIdExpirationMs, recoverSegmentCallback)
 
     if (!dir.getAbsolutePath.endsWith(DeleteDirSuffix)) {
-      val (deleted, nextOffset) = retryOnOffsetOverflow(
-        {
-          recoverLog(logStartOffset,
-                     maxProducerIdExpirationMs,
-                     producerStateManager,
-                     leaderEpochCache)
-        })
+      val (deleted, nextOffset) = retryOnOffsetOverflow {
+        recoverLog(logStartOffset, maxProducerIdExpirationMs, recoverSegmentCallback)
+      }
       deletedSegments ++= deleted
 
       // reset the index size of the currently active log segment to allow more entries
@@ -401,8 +394,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @param logStartOffset the log start offset
    * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
-   * @param producerStateManager The ProducerStateManager instance
-   * @param leaderEpochCache The LeaderEpochFileCache instance
+   * @param recoverSegmentCallback Callback to invoke when attempting to recover a segment
    *
    * @return the list of deleted segments and the next offset
    *
@@ -410,26 +402,25 @@ class LocalLog(@volatile private var _dir: File,
    */
   private[log] def recoverLog(logStartOffset: Long,
                               maxProducerIdExpirationMs: Int,
-                              producerStateManager: ProducerStateManager,
-                              leaderEpochCache: Option[LeaderEpochFileCache]): (List[LogSegment], Long) = {
+                              recoverSegmentCallback: LogSegment => Int): (List[LogSegment], Long) = {
     val deleted = scala.collection.mutable.ListBuffer[LogSegment]()
     /** return the log end offset if valid */
     def deleteSegmentsIfLogStartGreaterThanLogEnd(): Option[Long] = {
       if (logSegments.nonEmpty) {
         val logEndOffset = activeSegment.readNextOffset
-        if (logEndOffset >= logStartOffset)
+        if (logEndOffset >= logStartOffset) {
           Some(logEndOffset)
-        else {
+        } else {
           warn(s"Deleting all segments because logEndOffset ($logEndOffset) is smaller than logStartOffset ($logStartOffset). " +
             "This could happen if segment files were deleted from the file system.")
           val toDelete = logSegments.toList
           removeAndDeleteSegments(logSegments, asyncDelete = true, LogRecovery)
           deleted ++= toDelete
-          leaderEpochCache.foreach(_.clearAndFlush())
-          producerStateManager.truncateFullyAndStartAt(logStartOffset)
           None
         }
-      } else None
+      } else {
+        None
+      }
     }
 
     // if we have the clean shutdown marker, skip recovery
@@ -442,7 +433,7 @@ class LocalLog(@volatile private var _dir: File,
         info(s"Recovering unflushed segment ${segment.baseOffset}")
         val truncatedBytes =
           try {
-            recoverSegment(logStartOffset, segment, maxProducerIdExpirationMs, leaderEpochCache)
+            recoverSegmentCallback(segment)
           } catch {
             case _: InvalidOffsetException =>
               val startOffset = segment.baseOffset
@@ -503,7 +494,9 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @throws LogSegmentOffsetOverflowException if the log directory contains a segment with messages that overflow the index offset
    */
-  private[log] def loadSegmentFiles(logStartOffset: Long, maxProducerIdExpirationMs: Int): Unit = {
+  private[log] def loadSegmentFiles(logStartOffset: Long,
+                                    maxProducerIdExpirationMs: Int,
+                                    recoverSegmentCallback: LogSegment => Int): Unit = {
     // load segments in ascending order because transactional data from one segment may depend on the
     // segments that come before it
     for (file <- dir.listFiles.sortBy(_.getName) if file.isFile) {
@@ -530,40 +523,15 @@ class LocalLog(@volatile private var _dir: File,
           case _: NoSuchFileException =>
             error(s"Could not find offset index file corresponding to log file ${segment.log.file.getAbsolutePath}, " +
               "recovering segment and rebuilding index files...")
-            recoverSegment(logStartOffset, segment, maxProducerIdExpirationMs)
+            recoverSegmentCallback(segment)
           case e: CorruptIndexException =>
             warn(s"Found a corrupted index file corresponding to log file ${segment.log.file.getAbsolutePath} due " +
               s"to ${e.getMessage}}, recovering segment and rebuilding index files...")
-            recoverSegment(logStartOffset, segment, maxProducerIdExpirationMs)
+            recoverSegmentCallback(segment)
         }
         addSegment(segment)
       }
     }
-  }
-
-  /**
-   * Recover the given segment.
-   *
-   * @param logStartOffset the log start offset
-   * @param segment Segment to recover
-   * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
-   * @param leaderEpochCache Optional cache for updating the leader epoch during recovery
-   *
-   * @return The number of bytes truncated from the segment
-   *
-   * @throws LogSegmentOffsetOverflowException if the segment contains messages that cause index offset overflow
-   */
-  private[log] def recoverSegment(logStartOffset: Long,
-                                  segment: LogSegment,
-                                  maxProducerIdExpirationMs: Int,
-                                  leaderEpochCache: Option[LeaderEpochFileCache] = None): Int = {
-    val producerStateManager = new ProducerStateManager(topicPartition, dir, maxProducerIdExpirationMs)
-    rebuildProducerState(logStartOffset, segment.baseOffset, reloadFromCleanShutdown = false, producerStateManager)
-    val bytesTruncated = segment.recover(producerStateManager, leaderEpochCache)
-    // once we have recovered the segment's data, take a snapshot to ensure that we won't
-    // need to reload the same segment again while recovering another segment.
-    producerStateManager.takeSnapshot()
-    bytesTruncated
   }
 
   /**
@@ -578,7 +546,8 @@ class LocalLog(@volatile private var _dir: File,
    */
   private[log] def completeSwapOperations(swapFiles: Set[File],
                                           logStartOffset: Long,
-                                          maxProducerIdExpirationMs: Int): Seq[LogSegment] = {
+                                          maxProducerIdExpirationMs: Int,
+                                          recoverSegmentCallback: LogSegment => Int): Seq[LogSegment] = {
     val deletedSegments = ListBuffer[LogSegment]()
     for (swapFile <- swapFiles) {
       val logFile = new File(CoreUtils.replaceSuffix(swapFile.getPath, SwapFileSuffix, ""))
@@ -589,7 +558,7 @@ class LocalLog(@volatile private var _dir: File,
         time = time,
         fileSuffix = SwapFileSuffix)
       info(s"Found log file ${swapFile.getPath} from interrupted swap operation, repairing.")
-      recoverSegment(logStartOffset, swapSegment, maxProducerIdExpirationMs)
+      recoverSegmentCallback(swapSegment)
 
       // We create swap files for two cases:
       // (1) Log cleaning where multiple segments are merged into one, and
@@ -1239,90 +1208,6 @@ class LocalLog(@volatile private var _dir: File,
     activeSegment.truncateTo(targetOffset)
     deletable.toSeq
   }
-
-  // Rebuild producer state until lastOffset. This method may be called from the recovery code path, and thus must be
-  // free of all side-effects, i.e. it must not update any log-specific state.
-  def rebuildProducerState(logStartOffset: Long,
-                           lastOffset: Long,
-                           reloadFromCleanShutdown: Boolean,
-                           producerStateManager: ProducerStateManager): Unit = {
-    checkIfMemoryMappedBufferClosed()
-    val segments = logSegments
-    val offsetsToSnapshot =
-      if (segments.nonEmpty) {
-        val nextLatestSegmentBaseOffset = lowerSegment(segments.last.baseOffset).map(_.baseOffset)
-        Seq(nextLatestSegmentBaseOffset, Some(segments.last.baseOffset), Some(lastOffset))
-      } else {
-        Seq(Some(lastOffset))
-      }
-    info(s"Loading producer state till offset $lastOffset with message format version ${recordVersion.value}")
-
-    // We want to avoid unnecessary scanning of the log to build the producer state when the broker is being
-    // upgraded. The basic idea is to use the absence of producer snapshot files to detect the upgrade case,
-    // but we have to be careful not to assume too much in the presence of broker failures. The two most common
-    // upgrade cases in which we expect to find no snapshots are the following:
-    //
-    // 1. The broker has been upgraded, but the topic is still on the old message format.
-    // 2. The broker has been upgraded, the topic is on the new message format, and we had a clean shutdown.
-    //
-    // If we hit either of these cases, we skip producer state loading and write a new snapshot at the log end
-    // offset (see below). The next time the log is reloaded, we will load producer state using this snapshot
-    // (or later snapshots). Otherwise, if there is no snapshot file, then we have to rebuild producer state
-    // from the first segment.
-    if (recordVersion.value < RecordBatch.MAGIC_VALUE_V2 ||
-      (producerStateManager.latestSnapshotOffset.isEmpty && reloadFromCleanShutdown)) {
-      // To avoid an expensive scan through all of the segments, we take empty snapshots from the start of the
-      // last two segments and the last offset. This should avoid the full scan in the case that the log needs
-      // truncation.
-      offsetsToSnapshot.flatten.foreach { offset =>
-        producerStateManager.updateMapEndOffset(offset)
-        producerStateManager.takeSnapshot()
-      }
-    } else {
-      info(s"Reloading from producer snapshot and rebuilding producer state from offset $lastOffset")
-      val isEmptyBeforeTruncation = producerStateManager.isEmpty && producerStateManager.mapEndOffset >= lastOffset
-      val producerStateLoadStart = time.milliseconds()
-      producerStateManager.truncateAndReload(logStartOffset, lastOffset, time.milliseconds())
-      val segmentRecoveryStart = time.milliseconds()
-
-      // Only do the potentially expensive reloading if the last snapshot offset is lower than the log end
-      // offset (which would be the case on first startup) and there were active producers prior to truncation
-      // (which could be the case if truncating after initial loading). If there weren't, then truncating
-      // shouldn't change that fact (although it could cause a producerId to expire earlier than expected),
-      // and we can skip the loading. This is an optimization for users which are not yet using
-      // idempotent/transactional features yet.
-      if (lastOffset > producerStateManager.mapEndOffset && !isEmptyBeforeTruncation) {
-        val segmentOfLastOffset = floorLogSegment(lastOffset)
-
-        logSegments(producerStateManager.mapEndOffset, lastOffset).foreach { segment =>
-          val startOffset = Utils.max(segment.baseOffset, producerStateManager.mapEndOffset, logStartOffset)
-          producerStateManager.updateMapEndOffset(startOffset)
-
-          if (offsetsToSnapshot.contains(Some(segment.baseOffset)))
-            producerStateManager.takeSnapshot()
-
-          val maxPosition = if (segmentOfLastOffset.contains(segment)) {
-            Option(segment.translateOffset(lastOffset))
-              .map(_.position)
-              .getOrElse(segment.size)
-          } else {
-            segment.size
-          }
-
-          val fetchDataInfo = segment.read(startOffset,
-            maxSize = Int.MaxValue,
-            maxPosition = maxPosition,
-            minOneMessage = false)
-          if (fetchDataInfo != null)
-            loadProducersFromRecords(producerStateManager, fetchDataInfo.records)
-        }
-      }
-      producerStateManager.updateMapEndOffset(lastOffset)
-      producerStateManager.takeSnapshot()
-      info(s"Producer state recovery took ${producerStateLoadStart - segmentRecoveryStart}ms for snapshot load " +
-        s"and ${time.milliseconds() - segmentRecoveryStart}ms for segment recovery from offset $lastOffset")
-    }
-  }
 }
 
 /**
@@ -1527,7 +1412,8 @@ object LocalLog {
   private def isLogFile(file: File): Boolean =
     file.getPath.endsWith(LogFileSuffix)
 
-  private def loadProducersFromRecords(producerStateManager: ProducerStateManager, records: Records): Unit = {
+  // TODO: move to Log
+  private[log] def loadProducersFromRecords(producerStateManager: ProducerStateManager, records: Records): Unit = {
     val loadedProducers = mutable.Map.empty[Long, ProducerAppendInfo]
     val completedTxns = ListBuffer.empty[CompletedTxn]
     records.batches.forEach { batch =>
@@ -1545,6 +1431,7 @@ object LocalLog {
     completedTxns.foreach(producerStateManager.completeTxn)
   }
 
+  // TODO: move to Log
   def updateProducers(producerStateManager: ProducerStateManager,
                       batch: RecordBatch,
                       producers: mutable.Map[Long, ProducerAppendInfo],
