@@ -47,8 +47,7 @@ case class RollAction(preRollAction: Long => Unit, postRollAction: (LogSegment, 
 case class SplitSegmentResult(deletedSegments: Seq[LogSegment], newSegments: Seq[LogSegment])
 
 /**
- * An append-only log for storing messages locally.
- * The log is a sequence of LogSegments, each with a base offset denoting the first message in the segment.
+ * An append-only log for storing messages locally. The log is a sequence of LogSegments, each with a base offset.
  * New log segments are created according to a configurable policy that controls the size in bytes or time interval
  * for a given segment.
  *
@@ -140,8 +139,8 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   private[log] def updateConfig(newConfig: LogConfig): Unit = {
-    val oldConfig = this.config
-    this.config = newConfig
+    val oldConfig = config
+    config = newConfig
     val oldRecordVersion = oldConfig.messageFormatVersion.recordVersion
     val newRecordVersion = newConfig.messageFormatVersion.recordVersion
     if (newRecordVersion.precedes(oldRecordVersion))
@@ -261,37 +260,25 @@ class LocalLog(@volatile private var _dir: File,
       logSegments(from, activeSegment.baseOffset)
   }
 
-  private[log]  def recordVersion: RecordVersion = config.messageFormatVersion.recordVersion
+  private  def recordVersion: RecordVersion = config.messageFormatVersion.recordVersion
 
-  private[log]  def lowerSegment(offset: Long): Option[LogSegment] =
+  private  def lowerSegment(offset: Long): Option[LogSegment] =
     Option(segments.lowerEntry(offset)).map(_.getValue)
 
   /**
    * Get the largest log segment with a base offset less than or equal to the given offset, if one exists.
    * @return the optional log segment
    */
-  private[log]  def floorLogSegment(offset: Long): Option[LogSegment] = {
+  private def floorLogSegment(offset: Long): Option[LogSegment] = {
     Option(segments.floorEntry(offset)).map(_.getValue)
   }
 
   /**
-   * Add the given segment to the segments in this log. If this segment replaces an existing segment, delete it.
+   * Add the given segment to the segments in this log.
    * @param segment The segment to add
    */
   @threadsafe
-  private[log] def addSegment(segment: LogSegment): LogSegment = this.segments.put(segment.baseOffset, segment)
-
-  /**
-   * Clears all segments
-   */
-  private[log] def clearSegments(): Unit = segments.clear()
-
-  /**
-   * Closes all segments
-   */
-  private[log] def closeSegments(): Unit = {
-    logSegments.foreach(_.close())
-  }
+  private[log] def addSegment(segment: LogSegment): LogSegment = segments.put(segment.baseOffset, segment)
 
   /**
    * Close file handlers used by log but don't write to disk. This is called if the log directory is offline
@@ -307,7 +294,7 @@ class LocalLog(@volatile private var _dir: File,
   private[log] def close(): Unit = {
     maybeHandleIOException(s"Error while deleting log for $topicPartition in dir ${dir.getParent}") {
       checkIfMemoryMappedBufferClosed()
-      closeSegments()
+      logSegments.foreach(_.close())
     }
   }
 
@@ -395,9 +382,9 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   /**
-   * Recover the log segments and return the next offset after recovery.
-   * This method does not need to convert IOException to KafkaStorageException because it is usually called before all
-   * logs are loaded.
+   * Recovers the log segments, and returns the segments deleted along with the next offset after
+   * recovery. This method does not need to convert IOException to KafkaStorageException because it
+   * is usually called before all logs are loaded.
    *
    * @param logStartOffset the log start offset
    * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
@@ -408,7 +395,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @throws LogSegmentOffsetOverflowException if we encountered a legacy segment with offset overflow
    */
-  private[log] def recoverLog(logStartOffset: Long,
+  private def recoverLog(logStartOffset: Long,
                               maxProducerIdExpirationMs: Int,
                               producerStateManager: ProducerStateManager,
                               leaderEpochCache: Option[LeaderEpochFileCache]): (List[LogSegment], Long) = {
@@ -434,7 +421,7 @@ class LocalLog(@volatile private var _dir: File,
 
     // if we have the clean shutdown marker, skip recovery
     if (!hadCleanShutdown) {
-      val unflushed = logSegments(this.recoveryPoint, Long.MaxValue).iterator
+      val unflushed = logSegments(recoveryPoint, Long.MaxValue).iterator
       var truncated = false
 
       while (unflushed.hasNext && !truncated) {
@@ -471,7 +458,7 @@ class LocalLog(@volatile private var _dir: File,
         baseOffset = logStartOffset,
         config,
         time = time,
-        initFileSize = this.initFileSize,
+        initFileSize = initFileSize,
         preallocate = config.preallocate))
     }
 
@@ -503,7 +490,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @throws LogSegmentOffsetOverflowException if the log directory contains a segment with messages that overflow the index offset
    */
-  private[log] def loadSegmentFiles(logStartOffset: Long, maxProducerIdExpirationMs: Int): Unit = {
+  private def loadSegmentFiles(logStartOffset: Long, maxProducerIdExpirationMs: Int): Unit = {
     // load segments in ascending order because transactional data from one segment may depend on the
     // segments that come before it
     for (file <- dir.listFiles.sortBy(_.getName) if file.isFile) {
@@ -553,7 +540,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @throws LogSegmentOffsetOverflowException if the segment contains messages that cause index offset overflow
    */
-  private[log] def recoverSegment(logStartOffset: Long,
+  private def recoverSegment(logStartOffset: Long,
                                   segment: LogSegment,
                                   maxProducerIdExpirationMs: Int,
                                   leaderEpochCache: Option[LeaderEpochFileCache] = None): Int = {
@@ -576,7 +563,7 @@ class LocalLog(@volatile private var _dir: File,
    *                                           this situation. This is expected to be an extremely rare scenario in practice,
    *                                           and manual intervention might be required to get out of it.
    */
-  private[log] def completeSwapOperations(swapFiles: Set[File],
+  private def completeSwapOperations(swapFiles: Set[File],
                                           logStartOffset: Long,
                                           maxProducerIdExpirationMs: Int): Seq[LogSegment] = {
     val deletedSegments = ListBuffer[LogSegment]()
@@ -616,7 +603,7 @@ class LocalLog(@volatile private var _dir: File,
    *
    * @return Set of .swap files that are valid to be swapped in as segment files
    */
-  private[log] def removeTempFilesAndCollectSwapFiles(): Set[File] = {
+  private def removeTempFilesAndCollectSwapFiles(): Set[File] = {
 
     def deleteIndicesIfExist(baseFile: File, suffix: String = ""): Unit = {
       info(s"Deleting index files with suffix $suffix for baseFile $baseFile")
@@ -675,7 +662,7 @@ class LocalLog(@volatile private var _dir: File,
     validSwapFiles
   }
 
-  private[log] def retryOnOffsetOverflow[T](fn: => T): T = {
+  private def retryOnOffsetOverflow[T](fn: => T): T = {
     while (true) {
       try {
         return fn
@@ -688,7 +675,7 @@ class LocalLog(@volatile private var _dir: File,
     throw new IllegalStateException()
   }
 
-  private[log] def maybeHandleIOException[T](msg: => String)(fun: => T): T = {
+  private def maybeHandleIOException[T](msg: => String)(fun: => T): T = {
     try {
       checkForLogDirFailure()
       fun
@@ -867,13 +854,12 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * Perform physical deletion for the given segments. Allows the segments to be deleted asynchronously or synchronously.
-   *
-   * This method assumes that the segment exists and the method is not thread-safe.
-   *
+   * This method assumes that the segment exists.
    * This method does not need to convert IOException (thrown from changeFileSuffixes) to KafkaStorageException because
    * it is either called before all logs are loaded or the caller will catch and handle IOException
    *
    * @throws IOException if the segment files can't be renamed and still exists
+   *         KafkaStorageException if the segment files can't be deleted synchronously (when asyncDelete = false)
    */
   private[log] def deleteSegmentFiles(segments: Iterable[LogSegment],
                                       asyncDelete: Boolean): Unit = {
@@ -904,11 +890,14 @@ class LocalLog(@volatile private var _dir: File,
    * Asynchronous deletion allows reads to happen concurrently without synchronization and without the possibility of
    * physically deleting a file while it is being read.
    *
-   * This method does not need to convert IOException to KafkaStorageException because it is either called before all logs are loaded
-   * or the immediate caller will catch and handle IOException
+   * This method does not need to convert IOException (thrown when renaming segment files) to KafkaStorageException because
+   * it is either called before all logs are loaded or the immediate caller will catch and handle IOException.
    *
    * @param segments The log segments to schedule for deletion
    * @param asyncDelete Whether the segment files should be deleted asynchronously
+   *
+   * @throws IOException if the segment files can't be renamed and still exists
+   *         KafkaStorageException if the segment files can't be deleted synchronously (when asyncDelete = false)
    */
   private[log] def removeAndDeleteSegments(segments: Iterable[LogSegment],
                                            asyncDelete: Boolean,
@@ -926,7 +915,7 @@ class LocalLog(@volatile private var _dir: File,
     }
   }
 
-  private[log] def emptyFetchDataInfo(fetchOffsetMetadata: LogOffsetMetadata,
+  private def emptyFetchDataInfo(fetchOffsetMetadata: LogOffsetMetadata,
                                       includeAbortedTxns: Boolean): FetchDataInfo = {
     val abortedTransactions =
       if (includeAbortedTxns) Some(List.empty[FetchResponseData.AbortedTransaction])
@@ -934,18 +923,6 @@ class LocalLog(@volatile private var _dir: File,
     FetchDataInfo(fetchOffsetMetadata,
       MemoryRecords.EMPTY,
       abortedTransactions = abortedTransactions)
-  }
-
-  /**
-   * Given a message offset, find its corresponding offset metadata in the log.
-   * If the message offset is out of range, return None to the caller.
-   */
-  private[log] def convertToOffsetMetadata(offset: Long): Option[LogOffsetMetadata] = {
-    try {
-      Some(convertToOffsetMetadataOrThrow(offset))
-    } catch {
-      case _: OffsetOutOfRangeException => None
-    }
   }
 
   /**
@@ -1077,11 +1054,11 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   /**
-   * This function does not acquire Log.lock. The caller has to make sure log segments don't get deleted during
-   * this call, and also protects against calling this function on the same segment in parallel.
+   * The caller has to make sure log segments don't get deleted during this call, and also protects against calling
+   * this function on the same segment in parallel.
    *
    * Currently, it is used by LogCleaner threads on log compact non-active segments only with LogCleanerManager's lock
-   * to ensure no other logcleaner threads and retention thread can work on the same segment.
+   * to ensure no other LogCleaner threads and retention thread can work on the same segment.
    */
   private[log] def getFirstBatchTimestampForSegments(segments: Iterable[LogSegment]): Iterable[Long] = {
     segments.map {

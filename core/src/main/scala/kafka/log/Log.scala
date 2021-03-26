@@ -212,11 +212,11 @@ case object SnapshotGenerated extends LogStartOffsetIncrementReason {
  *
  * The log consists of tiered and local segments with the tiered portion of the log being optional. There could be an
  * overlap between the tiered and local segments. The active segment is always guaranteed to be local. If tiered segments
- * are present, they always appear at the head of the log, followed by an optional region of overlap, followed by the local
+ * are present, they always appear at the beginning of the log, followed by an optional region of overlap, followed by the local
  * segments including the active segment.
  *
  * NOTE: this class handles state and behavior specific to tiered segments as well as any behavior combining both tiered
- * and local segments. The state and behavior specific to local segments is handled by the encapsulated LocalLog instance.
+ * and local segments. The state and behavior specific to local segments are handled by the encapsulated LocalLog instance.
  *
  * @param localLog The LocalLog instance
  * @param config The log configuration settings
@@ -587,9 +587,7 @@ class Log(val localLog: LocalLog,
   }
 
   private def loadProducerState(lastOffset: Long, reloadFromCleanShutdown: Boolean): Unit = lock synchronized {
-    lock synchronized {
-      localLog.rebuildProducerState(logStartOffset, lastOffset, reloadFromCleanShutdown, producerStateManager)
-    }
+    localLog.rebuildProducerState(logStartOffset, lastOffset, reloadFromCleanShutdown, producerStateManager)
     maybeIncrementFirstUnstableOffset()
   }
 
@@ -1267,14 +1265,6 @@ class Log(val localLog: LocalLog,
     }
     // ensure that the returned seq is in descending order of offsets
     ret.toSeq.sortBy(-_)
-  }
-
-  def convertToOffsetMetadata(offset: Long): Option[LogOffsetMetadata] = {
-    try {
-      Some(convertToOffsetMetadataOrThrow(offset))
-    } catch {
-      case _: OffsetOutOfRangeException => None
-    }
   }
 
   def convertToOffsetMetadataOrThrow(offset: Long): LogOffsetMetadata = {
