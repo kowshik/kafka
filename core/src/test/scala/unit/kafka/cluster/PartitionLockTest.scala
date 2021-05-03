@@ -284,8 +284,8 @@ class PartitionLockTest extends Logging {
         val logDirFailureChannel = new LogDirFailureChannel(1)
         val segments = new LogSegments(log.topicPartition)
         val leaderEpochCache = Log.maybeCreateLeaderEpochCache(log.dir, log.topicPartition, logDirFailureChannel, log.config.messageFormatVersion.recordVersion)
-        val producerStateManager = new ProducerStateManager(log.topicPartition, log.dir, log.maxProducerIdExpirationMs)
-        val offsets = LogLoader.load(LoadLogParams(
+        val producerStateManager = new ProducerStateManager(log.topicPartition, log.dir, 60 * 60 * 1000)
+        val loadedLog = LogLoader.load(LoadLogParams(
           log.dir,
           log.topicPartition,
           log.config,
@@ -296,10 +296,10 @@ class PartitionLockTest extends Logging {
           segments,
           0L,
           0L,
-          log.maxProducerIdExpirationMs,
+          60 * 60 * 1000,
           leaderEpochCache,
           producerStateManager))
-        new SlowLog(log, segments, offsets, leaderEpochCache, producerStateManager, mockTime, logDirFailureChannel, appendSemaphore)
+        new SlowLog(log, loadedLog, leaderEpochCache, producerStateManager, appendSemaphore)
       }
     }
     when(offsetCheckpoints.fetch(ArgumentMatchers.anyString, ArgumentMatchers.eq(topicPartition)))
@@ -362,29 +362,17 @@ class PartitionLockTest extends Logging {
 
   private class SlowLog(
     log: Log,
-    segments: LogSegments,
-    offsets: LoadedLogOffsets,
+    loadedLog: LoadedLog,
     leaderEpochCache: Option[LeaderEpochFileCache],
     producerStateManager: ProducerStateManager,
-    mockTime: MockTime,
-    logDirFailureChannel: LogDirFailureChannel,
     appendSemaphore: Semaphore
   ) extends Log(
-    log.dir,
-    log.config,
-    segments,
-    offsets.logStartOffset,
-    offsets.recoveryPoint,
-    offsets.nextOffsetMetadata,
-    mockTime.scheduler,
+    loadedLog.logStartOffset,
+    loadedLog.localLog,
     new BrokerTopicStats,
-    mockTime,
-    log.maxProducerIdExpirationMs,
     log.producerIdExpirationCheckIntervalMs,
-    log.topicPartition,
     leaderEpochCache,
     producerStateManager,
-    logDirFailureChannel,
     topicId = None,
     keepPartitionMetadataFile = true) {
 

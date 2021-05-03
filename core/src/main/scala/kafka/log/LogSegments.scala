@@ -207,6 +207,11 @@ class LogSegments(topicPartition: TopicPartition) {
   def firstSegment: Option[LogSegment] = firstEntry.map(_.getValue)
 
   /**
+   * @return the base offset of the log segment associated with the smallest offset, if it exists
+   */
+  private[log] def firstSegmentBaseOffset: Option[Long] = firstSegment.map(_.baseOffset)
+
+  /**
    * @return the entry associated with the greatest offset, if it exists.
    */
   @threadsafe
@@ -217,4 +222,36 @@ class LogSegments(topicPartition: TopicPartition) {
    */
   @threadsafe
   def lastSegment: Option[LogSegment] = lastEntry.map(_.getValue)
+
+  /**
+   * The active segment that is currently taking appends
+   */
+  def activeSegment = lastSegment.get
+
+  /**
+   * Calculate the log's size (in bytes) from its log segments.
+   *
+   * @return Sum of the log segments' sizes (in bytes)
+   */
+  def sizeInBytes: Long = LogSegments.sizeInBytes(values)
+
+  def filter(predicate: LogSegment => Boolean): Iterable[LogSegment] = values.filter(predicate)
+}
+
+object LogSegments {
+  /**
+   * Calculate a log's size (in bytes) from the provided log segments.
+   *
+   * @param segments The log segments to calculate the size of
+   * @return Sum of the log segments' sizes (in bytes)
+   */
+  def sizeInBytes(segments: Iterable[LogSegment]): Long =
+    segments.map(_.size.toLong).sum
+
+  def getFirstBatchTimestampForSegments(segments: Iterable[LogSegment]): Iterable[Long] = {
+    segments.map {
+      segment =>
+        segment.getFirstBatchTimestamp()
+    }
+  }
 }

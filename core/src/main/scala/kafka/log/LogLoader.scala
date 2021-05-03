@@ -31,9 +31,8 @@ import org.apache.kafka.common.utils.Time
 
 import scala.collection.{Seq, Set, mutable}
 
-case class LoadedLogOffsets(logStartOffset: Long,
-                            recoveryPoint: Long,
-                            nextOffsetMetadata: LogOffsetMetadata)
+case class LoadedLog(logStartOffset: Long,
+                     localLog: LocalLog)
 
 /**
  * @param dir The directory from which log segments need to be loaded
@@ -74,22 +73,33 @@ case class LoadLogParams(dir: File,
  * This object is responsible for all activities related with recovery of log segments from disk.
  */
 object LogLoader extends Logging {
+
   /**
-   * Load the log segments from the log files on disk, and return the components of the loaded log.
-   * Additionally, it also suitably updates the provided LeaderEpochFileCache and ProducerStateManager
-   * to reflect the contents of the loaded log.
+   * Clean shutdown file that indicates the broker was cleanly shutdown in 0.8 and higher.
+   * This is used to avoid unnecessary recovery after a clean shutdown. In theory this could be
+   * avoided by passing in the recovery point, however finding the correct position to do this
+   * requires accessing the offset index which may not be safe in an unclean shutdown.
+   * For more information see the discussion in PR#2104
+   */
+  val CleanShutdownFile = ".kafka_cleanshutdown"
+
+  /**
+   * Loads the log segments from the log files on disk, and returns a LocalLog instance constructed
+   * using the same and the new log start offset. Additionally, it also suitably updates the provided
+   * LeaderEpochFileCache and ProducerStateManager to reflect the contents of the loaded log.
    *
    * In the context of the calling thread, this function does not need to convert IOException to
    * KafkaStorageException because it is only called before all logs are loaded.
    *
-   * @param params The parameters for the log being loaded from disk
+   * @param params The parameters for the log being loaded from disk.
    *
-   * @return the offsets of the Log successfully loaded from disk
+   * @return a LoadedLog instance containing the new log start offset and a LocalLog instance
+   *         created using the segments loaded from disk.
    *
    * @throws LogSegmentOffsetOverflowException if we encounter a .swap file with messages that
    *                                           overflow index offset
    */
-  def load(params: LoadLogParams): LoadedLogOffsets = {
+  def load(params: LoadLogParams): LoadedLog = {
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
     val swapFiles = removeTempFilesAndCollectSwapFiles(params)
@@ -153,12 +163,18 @@ object LogLoader extends Logging {
       params.config.messageFormatVersion.recordVersion,
       params.time,
       reloadFromCleanShutdown = params.hadCleanShutdown)
-
-    val activeSegment = params.segments.lastSegment.get
-    LoadedLogOffsets(
-      newLogStartOffset,
-      newRecoveryPoint,
-      LogOffsetMetadata(nextOffset, activeSegment.baseOffset, activeSegment.size))
+    val localLog = new LocalLog(params.dir,
+                                params.config,
+                                params.segments,
+                                newRecoveryPoint,
+                                LogOffsetMetadata(nextOffset,
+                                                  params.segments.activeSegment.baseOffset,
+                                                  params.segments.activeSegment.size),
+                                params.scheduler,
+                                params.time,
+                                params.topicPartition,
+                                params.logDirFailureChannel)
+    LoadedLog(newLogStartOffset, localLog)
   }
 
   /**
@@ -246,7 +262,7 @@ object LogLoader extends Logging {
       } catch {
         case e: LogSegmentOffsetOverflowException =>
           info(s"${params.logIdentifier} Caught segment overflow error: ${e.getMessage}. Split segment and retry.")
-          Log.splitOverflowedSegment(
+          val result = Log.splitOverflowedSegment(
             e.segment,
             params.segments,
             params.dir,
@@ -255,6 +271,7 @@ object LogLoader extends Logging {
             params.scheduler,
             params.logDirFailureChannel,
             params.producerStateManager)
+          deleteProducerSnapshotsAsync(result.deletedSegments, params)
       }
     }
     throw new IllegalStateException()
@@ -380,17 +397,17 @@ object LogLoader extends Logging {
       val oldSegments = params.segments.values(swapSegment.baseOffset, swapSegment.readNextOffset).filter { segment =>
         segment.readNextOffset > swapSegment.baseOffset
       }
-      Log.replaceSegments(
+      val deletedSegments = Log.replaceSegments(
         params.segments,
         Seq(swapSegment),
         oldSegments.toSeq,
-        isRecoveredSwapFile = true,
         params.dir,
         params.topicPartition,
         params.config,
         params.scheduler,
         params.logDirFailureChannel,
-        params.producerStateManager)
+        isRecoveredSwapFile = true)
+      deleteProducerSnapshotsAsync(deletedSegments, params)
     }
   }
 
@@ -513,13 +530,23 @@ object LogLoader extends Logging {
       Log.deleteSegmentFiles(
         segmentsToDelete,
         asyncDelete = true,
-        deleteProducerStateSnapshots = true,
         params.dir,
         params.topicPartition,
         params.config,
         params.scheduler,
-        params.logDirFailureChannel,
-        params.producerStateManager)
+        params.logDirFailureChannel)
+      deleteProducerSnapshotsAsync(segmentsToDelete, params)
     }
+  }
+
+  private def deleteProducerSnapshotsAsync(segments: Iterable[LogSegment],
+                                               params: LoadLogParams): Unit = {
+    Log.deleteProducerSnapshotsAsync(segments,
+      params.producerStateManager,
+      params.scheduler,
+      params.config,
+      params.logDirFailureChannel,
+      params.dir.getParent,
+      params.topicPartition)
   }
 }
